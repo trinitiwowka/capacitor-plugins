@@ -1,6 +1,8 @@
 package com.capacitorjs.plugins.browser;
 
+import android.app.Activity;
 import android.content.ActivityNotFoundException;
+import android.content.Context;
 import android.content.Intent;
 import android.net.Uri;
 import com.getcapacitor.Logger;
@@ -60,25 +62,65 @@ public class BrowserPlugin extends Plugin {
         }
 
         // open the browser and finish
+        Context launchContext = getActivity();
+        if (launchContext == null) {
+            launchContext = getContext();
+        }
 
-        Intent intent = new Intent(getContext(), BrowserControllerActivity.class);
+        Intent intent = new Intent(launchContext, BrowserControllerActivity.class);
         intent.addFlags(Intent.FLAG_ACTIVITY_CLEAR_TOP);
-        intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
-        getContext().startActivity(intent);
+        if (!(launchContext instanceof Activity)) {
+            intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
+        }
 
-        Integer finalToolbarColor = toolbarColor;
-        setBrowserControllerListener(
-            activity -> {
-                try {
-                    activity.open(implementation, url, finalToolbarColor);
-                    browserControllerActivityInstance = activity;
-                    call.resolve();
-                } catch (ActivityNotFoundException ex) {
-                    Logger.error(getLogTag(), ex.getLocalizedMessage(), null);
-                    call.reject("Unable to display URL");
-                }
+        if (intent.resolveActivity(launchContext.getPackageManager()) == null) {
+            Logger.error(getLogTag(), "No Activity found to handle internal browser controller", null);
+            if (!launchExternalBrowser(launchContext, url, urlString)) {
+                call.reject("No Activity found to handle the Intent for URL: " + urlString);
+            } else {
+                call.resolve();
             }
-        );
+            return;
+        }
+
+        try {
+            launchContext.startActivity(intent);
+
+            Integer finalToolbarColor = toolbarColor;
+            Context finalLaunchContext = launchContext;
+            String finalUrlString = urlString;
+            Uri finalUrl = url;
+            setBrowserControllerListener(
+                activity -> {
+                    try {
+                        activity.open(implementation, finalUrl, finalToolbarColor);
+                        browserControllerActivityInstance = activity;
+                        call.resolve();
+                    } catch (ActivityNotFoundException ex) {
+                        Logger.warn(getLogTag(), "Custom tabs unavailable, attempting external browser fallback", ex);
+                        activity.finish();
+                        if (launchExternalBrowser(finalLaunchContext, finalUrl, finalUrlString)) {
+                            call.resolve();
+                        } else {
+                            call.reject("No activity found to handle the URL: " + finalUrlString, ex);
+                        }
+                    } catch (Exception ex) {
+                        Logger.error(getLogTag(), "Error while opening the URL", ex);
+                        call.reject("Failed to open URL: " + ex.getMessage(), ex);
+                    }
+                }
+            );
+        } catch (ActivityNotFoundException ex) {
+            Logger.error(getLogTag(), "No activity found to handle the URL: " + urlString, ex);
+            if (!launchExternalBrowser(launchContext, url, urlString)) {
+                call.reject("No activity found to handle the URL: " + urlString, ex);
+            } else {
+                call.resolve();
+            }
+        } catch (Exception ex) {
+            Logger.error(getLogTag(), "Unexpected error occurred", ex);
+            call.reject("Unexpected error occurred: " + ex.getMessage(), ex);
+        }
     }
 
     @PluginMethod
@@ -113,5 +155,27 @@ public class BrowserPlugin extends Plugin {
                 notifyListeners("browserFinished", null);
                 break;
         }
+    }
+
+    private boolean launchExternalBrowser(Context context, Uri url, String urlString) {
+        Intent fallbackIntent = new Intent(Intent.ACTION_VIEW, url);
+        fallbackIntent.addFlags(Intent.FLAG_ACTIVITY_CLEAR_TOP);
+        if (!(context instanceof Activity)) {
+            fallbackIntent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
+        }
+
+        try {
+            if (fallbackIntent.resolveActivity(context.getPackageManager()) != null) {
+                context.startActivity(fallbackIntent);
+                return true;
+            }
+            Logger.error(getLogTag(), "No application available to open URL externally: " + urlString, null);
+        } catch (ActivityNotFoundException ex) {
+            Logger.error(getLogTag(), "Fallback browser activity not found for URL: " + urlString, ex);
+        } catch (Exception ex) {
+            Logger.error(getLogTag(), "Unexpected error launching fallback browser for URL: " + urlString, ex);
+        }
+
+        return false;
     }
 }
